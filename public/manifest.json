@@ -1,0 +1,17 @@
+{
+  "name": "RoutineX - Personal Daily Routine & Time Blocking",
+  "short_name": "RoutineX",
+  "description": "Production-ready daily routine manager and time blocking engine",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
+
