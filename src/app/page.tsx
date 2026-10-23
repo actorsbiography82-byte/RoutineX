@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Check, 
   Trash2, 
@@ -8,21 +8,44 @@ import {
   RotateCcw, 
   Sun, 
   Moon, 
-  Sparkles,
-  CheckCircle2,
-  ListTodo
+  ListTodo,
+  Settings,
+  Cloud,
+  CloudOff,
+  RefreshCw,
+  Edit2,
+  AlertCircle,
+  CheckCircle2
 } from 'lucide-react';
-import { Task, TaskCategory } from '@/types/routine';
+import { Task, TaskCategory, SheetConfig, SyncStatus } from '@/types/routine';
 import { INITIAL_TASKS } from '@/data/defaultRoutine';
+import { pushTasksToSheet, pullTasksFromSheet } from '@/utils/syncService';
+import { SettingsModal } from '@/components/SettingsModal';
+import { EditTaskModal } from '@/components/EditTaskModal';
 
 const STORAGE_KEY = 'routinex_tasks_v2';
 const THEME_KEY = 'routinex_theme';
+const CONFIG_KEY = 'routinex_sheet_config';
 
 export default function RoutineXPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   
+  // Sheet config & sync status
+  const [sheetConfig, setSheetConfig] = useState<SheetConfig>({
+    scriptUrl: '',
+    lastSyncedAt: null,
+    autoSync: true,
+  });
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('local_only');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+
+  // Modals state
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+
   // Filter state
   const [filter, setFilter] = useState<'all' | 'pending' | 'completed'>('all');
 
@@ -32,9 +55,14 @@ export default function RoutineXPage() {
   const [newCategory, setNewCategory] = useState<TaskCategory>('General');
   const [isFormOpen, setIsFormOpen] = useState(false);
 
-  // Initialize theme and load tasks from LocalStorage
+  // Debounce ref for background sync
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 1. Initialize theme, online status, config, and tasks from LocalStorage
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    setIsOnline(navigator.onLine);
 
     // Theme initialization
     const savedTheme = localStorage.getItem(THEME_KEY) as 'dark' | 'light' | null;
@@ -46,27 +74,177 @@ export default function RoutineXPage() {
       document.documentElement.classList.remove('dark');
     }
 
+    // Sheet Config initialization
+    let loadedConfig: SheetConfig = { scriptUrl: '', lastSyncedAt: null, autoSync: true };
+    try {
+      const storedConfig = localStorage.getItem(CONFIG_KEY);
+      if (storedConfig) {
+        loadedConfig = JSON.parse(storedConfig);
+        setSheetConfig(loadedConfig);
+      }
+    } catch (e) {
+      console.error('Failed to load sheet config', e);
+    }
+
     // Tasks initialization
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        setTasks(JSON.parse(stored));
+        const parsed = JSON.parse(stored);
+        setTasks(parsed);
+        if (loadedConfig.scriptUrl) {
+          setSyncStatus('synced');
+        } else {
+          setSyncStatus('local_only');
+        }
       } else {
         setTasks(INITIAL_TASKS);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_TASKS));
+        setSyncStatus(loadedConfig.scriptUrl ? 'synced' : 'local_only');
       }
     } catch {
       setTasks(INITIAL_TASKS);
     } finally {
       setIsLoaded(true);
     }
+
+    // Listen to network status
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (loadedConfig.scriptUrl) {
+        // Trigger auto-sync when connection returns
+        const currentTasks = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        triggerBackgroundSync(loadedConfig.scriptUrl, currentTasks);
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
-  // Save tasks to LocalStorage on update
-  const saveTasks = (updated: Task[]) => {
-    setTasks(updated);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  // Background sync helper
+  const triggerBackgroundSync = useCallback(
+    (scriptUrl: string, tasksToSync: Task[]) => {
+      if (!scriptUrl || typeof window === 'undefined') return;
+
+      if (!navigator.onLine) {
+        setSyncStatus('offline');
+        return;
+      }
+
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current);
+      }
+
+      setSyncStatus('syncing');
+
+      syncTimeoutRef.current = setTimeout(async () => {
+        try {
+          const res = await pushTasksToSheet(scriptUrl, tasksToSync);
+          if (res.success) {
+            setSyncStatus('synced');
+            const now = Date.now();
+            setSheetConfig((prev) => {
+              const updated = { ...prev, lastSyncedAt: now };
+              localStorage.setItem(CONFIG_KEY, JSON.stringify(updated));
+              return updated;
+            });
+          } else {
+            setSyncStatus('error');
+          }
+        } catch {
+          setSyncStatus('error');
+        }
+      }, 1200); // 1.2s debounce to avoid rate limits
+    },
+    []
+  );
+
+  // Save tasks locally (immediate) and schedule cloud sync
+  const saveTasks = useCallback(
+    (updated: Task[]) => {
+      setTasks(updated);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      }
+
+      if (sheetConfig.scriptUrl) {
+        triggerBackgroundSync(sheetConfig.scriptUrl, updated);
+      }
+    },
+    [sheetConfig.scriptUrl, triggerBackgroundSync]
+  );
+
+  // Manual push to Google Sheet
+  const handleManualPush = async () => {
+    if (!sheetConfig.scriptUrl) return;
+    setIsSyncing(true);
+    setSyncStatus('syncing');
+    try {
+      const res = await pushTasksToSheet(sheetConfig.scriptUrl, tasks);
+      if (res.success) {
+        setSyncStatus('synced');
+        const now = Date.now();
+        const updated = { ...sheetConfig, lastSyncedAt: now };
+        setSheetConfig(updated);
+        localStorage.setItem(CONFIG_KEY, JSON.stringify(updated));
+      } else {
+        setSyncStatus('error');
+        alert(res.error || 'Failed to push tasks to Google Sheet.');
+      }
+    } catch (e: any) {
+      setSyncStatus('error');
+      alert(e.message || 'Sync error occurred.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Manual pull from Google Sheet
+  const handleManualPull = async () => {
+    if (!sheetConfig.scriptUrl) return;
+    setIsSyncing(true);
+    setSyncStatus('syncing');
+    try {
+      const res = await pullTasksFromSheet(sheetConfig.scriptUrl);
+      if (res.success && res.tasks) {
+        setTasks(res.tasks);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(res.tasks));
+        setSyncStatus('synced');
+        const now = Date.now();
+        const updated = { ...sheetConfig, lastSyncedAt: now };
+        setSheetConfig(updated);
+        localStorage.setItem(CONFIG_KEY, JSON.stringify(updated));
+      } else {
+        setSyncStatus('error');
+        alert(res.error || 'Failed to pull tasks from Google Sheet.');
+      }
+    } catch (e: any) {
+      setSyncStatus('error');
+      alert(e.message || 'Failed to fetch from Google Sheet.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Save new sheet configuration from settings modal
+  const handleSaveConfig = (newConfig: SheetConfig) => {
+    setSheetConfig(newConfig);
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(newConfig));
+    if (newConfig.scriptUrl) {
+      setSyncStatus('syncing');
+      triggerBackgroundSync(newConfig.scriptUrl, tasks);
+    } else {
+      setSyncStatus('local_only');
     }
   };
 
@@ -87,9 +265,16 @@ export default function RoutineXPage() {
   // Check / Uncheck task
   const toggleTask = (id: string) => {
     const updated = tasks.map((t) =>
-      t.id === id ? { ...t, completed: !t.completed } : t
+      t.id === id ? { ...t, completed: !t.completed, updatedAt: Date.now() } : t
     );
     saveTasks(updated);
+  };
+
+  // Edit existing task
+  const handleSaveEditedTask = (updatedTask: Task) => {
+    const updated = tasks.map((t) => (t.id === updatedTask.id ? updatedTask : t));
+    saveTasks(updated);
+    setEditingTask(null);
   };
 
   // Delete task
@@ -110,6 +295,7 @@ export default function RoutineXPage() {
       category: newCategory,
       completed: false,
       createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
 
     saveTasks([newTask, ...tasks]);
@@ -121,7 +307,7 @@ export default function RoutineXPage() {
 
   // Uncheck all tasks (for starting a new day)
   const resetChecks = () => {
-    const reset = tasks.map((t) => ({ ...t, completed: false }));
+    const reset = tasks.map((t) => ({ ...t, completed: false, updatedAt: Date.now() }));
     saveTasks(reset);
   };
 
@@ -161,7 +347,7 @@ export default function RoutineXPage() {
     }
   };
 
-  // Formatted date string (e.g., "Friday, Oct 23")
+  // Formatted date string
   const todayFormatted = new Intl.DateTimeFormat('en-US', {
     weekday: 'long',
     month: 'short',
@@ -181,7 +367,7 @@ export default function RoutineXPage() {
       <div className="max-w-xl mx-auto space-y-7">
 
         {/* Minimalist Top Header */}
-        <header className="flex items-center justify-between pb-2 border-b border-zinc-200/80 dark:border-zinc-800/80">
+        <header className="flex items-center justify-between pb-3 border-b border-zinc-200/80 dark:border-zinc-800/80">
           <div>
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -189,13 +375,61 @@ export default function RoutineXPage() {
                 Routine<span className="text-rose-500">X</span>
               </h1>
             </div>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 font-medium mt-0.5">
-              {todayFormatted}
-            </p>
+            
+            {/* Date & Clickable Sync Status Badge */}
+            <div className="flex items-center gap-2 mt-0.5 text-xs">
+              <span className="text-zinc-500 dark:text-zinc-400 font-medium">
+                {todayFormatted}
+              </span>
+              <span className="text-zinc-300 dark:text-zinc-700">•</span>
+              
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium transition-all hover:opacity-80 border"
+                style={{
+                  backgroundColor: 
+                    syncStatus === 'synced' ? 'rgba(16, 185, 129, 0.1)' :
+                    syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.1)' :
+                    syncStatus === 'offline' ? 'rgba(245, 158, 11, 0.1)' :
+                    syncStatus === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(161, 161, 170, 0.1)',
+                  borderColor:
+                    syncStatus === 'synced' ? 'rgba(16, 185, 129, 0.3)' :
+                    syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.3)' :
+                    syncStatus === 'offline' ? 'rgba(245, 158, 11, 0.3)' :
+                    syncStatus === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(161, 161, 170, 0.3)',
+                  color:
+                    syncStatus === 'synced' ? '#10b981' :
+                    syncStatus === 'syncing' ? '#3b82f6' :
+                    syncStatus === 'offline' ? '#f59e0b' :
+                    syncStatus === 'error' ? '#ef4444' : '#a1a1aa'
+                }}
+                title="Google Sheet Sync Status. Click to configure."
+              >
+                {syncStatus === 'synced' && <Cloud className="w-3 h-3" />}
+                {syncStatus === 'syncing' && <RefreshCw className="w-3 h-3 animate-spin" />}
+                {syncStatus === 'offline' && <CloudOff className="w-3 h-3" />}
+                {syncStatus === 'local_only' && <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />}
+                {syncStatus === 'error' && <AlertCircle className="w-3 h-3" />}
+                <span>
+                  {syncStatus === 'synced' ? 'Cloud Synced' :
+                   syncStatus === 'syncing' ? 'Syncing...' :
+                   syncStatus === 'offline' ? 'Offline (Queued)' :
+                   syncStatus === 'error' ? 'Sync Error' : 'Local Only'}
+                </span>
+              </button>
+            </div>
           </div>
 
-          {/* Quick Actions */}
+          {/* Top Actions */}
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              title="Google Sheet Cloud Settings"
+              className="p-2 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 rounded-xl hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all text-xs font-medium"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+
             <button
               onClick={resetChecks}
               title="Uncheck all tasks for a new day"
@@ -390,15 +624,27 @@ export default function RoutineXPage() {
                   </div>
                 </div>
 
-                {/* Right: Delete Action Button */}
-                <button
-                  type="button"
-                  onClick={() => deleteTask(task.id)}
-                  title="Delete task"
-                  className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-all flex-shrink-0"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                {/* Right: Edit & Delete Action Buttons */}
+                <div className="flex items-center gap-0.5 flex-shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setEditingTask(task)}
+                    title="Edit task"
+                    className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => deleteTask(task.id)}
+                    title="Delete task"
+                    className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
               </div>
             ))
           )}
@@ -406,17 +652,40 @@ export default function RoutineXPage() {
 
         {/* Minimal Footer */}
         <footer className="pt-6 border-t border-zinc-200/80 dark:border-zinc-800/80 flex flex-col sm:flex-row items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 gap-2">
-          <span>100% Offline • Saved in Browser LocalStorage</span>
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            <span>Hybrid Offline Storage + Google Sheet Sync</span>
+          </div>
           
           <button
             onClick={restoreDefaults}
             className="hover:underline text-zinc-500 dark:text-zinc-400 transition-all"
           >
-            Restore Default Routine Schedule
+            Restore Default Schedule
           </button>
         </footer>
 
       </div>
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        config={sheetConfig}
+        onSaveConfig={handleSaveConfig}
+        onManualPull={handleManualPull}
+        onManualPush={handleManualPush}
+        isSyncing={isSyncing}
+      />
+
+      {/* Edit Task Modal */}
+      <EditTaskModal
+        task={editingTask}
+        isOpen={!!editingTask}
+        onClose={() => setEditingTask(null)}
+        onSaveTask={handleSaveEditedTask}
+      />
+
     </div>
   );
 }
