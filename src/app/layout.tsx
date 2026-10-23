@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'RoutineX - Personal Daily Routine & Time Blocking Engine',
-  description: 'Production-ready daily routine manager, task tracker, and time blocking engine for personal growth, spiritual discipline, Foodpanda shifts, YouTube studio, and Web Dev agency work.',
+  title: 'RoutineX - Minimalist Daily Routine & Task Tracker',
+  description: 'Clean, distraction-free, offline daily routine and task tracker for personal growth, spiritual discipline, Foodpanda, YouTube, and Web Dev work.',
   manifest: '/manifest.json',
   icons: {
     icon: '/favicon.ico',
@@ -16,8 +16,8 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   themeColor: [
-    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
-    { media: '(prefers-color-scheme: dark)', color: '#090d16' },
+    { media: '(prefers-color-scheme: light)', color: '#fafafa' },
+    { media: '(prefers-color-scheme: dark)', color: '#09090b' },
   ],
 };
 
@@ -50,4 +50,3 @@ export default function RootLayout({
     </html>
   );
 }
-
