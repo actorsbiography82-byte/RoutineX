@@ -75,6 +75,60 @@ export async function pullTasksFromSheet(scriptUrl: string): Promise<{ success: 
   return { success: false, error: 'Failed to pull from Google Sheet' };
 }
 
+/**
+ * Smartly merges remote tasks with local tasks using timestamp-based reconciliation.
+ */
+export function mergeTasks(localTasks: Task[], remoteTasks: Task[]): { merged: Task[]; hasChanges: boolean } {
+  if (!remoteTasks || remoteTasks.length === 0) {
+    return { merged: localTasks, hasChanges: false };
+  }
+
+  const localJson = JSON.stringify(localTasks);
+  const remoteJson = JSON.stringify(remoteTasks);
+  if (localJson === remoteJson) {
+    return { merged: localTasks, hasChanges: false };
+  }
+
+  if (!localTasks || localTasks.length === 0) {
+    return { merged: remoteTasks, hasChanges: true };
+  }
+
+  const localMap = new Map<string, Task>(localTasks.map((t) => [t.id, t]));
+  const finalTasks: Task[] = [];
+  const processedIds = new Set<string>();
+
+  // Process tasks from remote list
+  for (const remote of remoteTasks) {
+    processedIds.add(remote.id);
+    const local = localMap.get(remote.id);
+    if (!local) {
+      finalTasks.push(remote);
+    } else {
+      const localTime = local.updatedAt || local.createdAt || 0;
+      const remoteTime = remote.updatedAt || remote.createdAt || 0;
+      // If local was updated more recently, keep local change
+      if (localTime > remoteTime) {
+        finalTasks.push(local);
+      } else {
+        finalTasks.push(remote);
+      }
+    }
+  }
+
+  // Preserve local tasks that were created very recently (< 15 seconds) and not yet synced
+  const now = Date.now();
+  for (const local of localTasks) {
+    if (!processedIds.has(local.id)) {
+      if (now - (local.createdAt || 0) < 15000) {
+        finalTasks.push(local);
+      }
+    }
+  }
+
+  const changed = JSON.stringify(finalTasks) !== localJson;
+  return { merged: finalTasks, hasChanges: changed };
+}
+
 export const GOOGLE_APPS_SCRIPT_CODE = `/**
  * RoutineX Google Sheet Backend Sync Bridge
  * 1. Open Google Sheet -> Extensions -> Apps Script
@@ -147,4 +201,3 @@ function doPost(e) {
   }
 }
 `;
-

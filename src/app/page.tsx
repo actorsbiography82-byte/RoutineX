@@ -14,12 +14,11 @@ import {
   CloudOff,
   RefreshCw,
   Edit2,
-  AlertCircle,
-  CheckCircle2
+  AlertCircle
 } from 'lucide-react';
 import { Task, TaskCategory, SheetConfig, SyncStatus } from '@/types/routine';
 import { INITIAL_TASKS } from '@/data/defaultRoutine';
-import { pushTasksToSheet, pullTasksFromSheet } from '@/utils/syncService';
+import { pushTasksToSheet, pullTasksFromSheet, mergeTasks } from '@/utils/syncService';
 import { SettingsModal } from '@/components/SettingsModal';
 import { EditTaskModal } from '@/components/EditTaskModal';
 
@@ -55,84 +54,12 @@ export default function RoutineXPage() {
   const [newCategory, setNewCategory] = useState<TaskCategory>('General');
   const [isFormOpen, setIsFormOpen] = useState(false);
 
-  // Debounce ref for background sync
+  // Debounce ref for background push
   const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isPullingRef = useRef(false);
 
-  // 1. Initialize theme, online status, config, and tasks from LocalStorage
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    setIsOnline(navigator.onLine);
-
-    // Theme initialization
-    const savedTheme = localStorage.getItem(THEME_KEY) as 'dark' | 'light' | null;
-    const initialTheme = savedTheme || 'dark';
-    setTheme(initialTheme);
-    if (initialTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-
-    // Sheet Config initialization
-    let loadedConfig: SheetConfig = { scriptUrl: '', lastSyncedAt: null, autoSync: true };
-    try {
-      const storedConfig = localStorage.getItem(CONFIG_KEY);
-      if (storedConfig) {
-        loadedConfig = JSON.parse(storedConfig);
-        setSheetConfig(loadedConfig);
-      }
-    } catch (e) {
-      console.error('Failed to load sheet config', e);
-    }
-
-    // Tasks initialization
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        setTasks(parsed);
-        if (loadedConfig.scriptUrl) {
-          setSyncStatus('synced');
-        } else {
-          setSyncStatus('local_only');
-        }
-      } else {
-        setTasks(INITIAL_TASKS);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_TASKS));
-        setSyncStatus(loadedConfig.scriptUrl ? 'synced' : 'local_only');
-      }
-    } catch {
-      setTasks(INITIAL_TASKS);
-    } finally {
-      setIsLoaded(true);
-    }
-
-    // Listen to network status
-    const handleOnline = () => {
-      setIsOnline(true);
-      if (loadedConfig.scriptUrl) {
-        // Trigger auto-sync when connection returns
-        const currentTasks = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-        triggerBackgroundSync(loadedConfig.scriptUrl, currentTasks);
-      }
-    };
-    const handleOffline = () => {
-      setIsOnline(false);
-      setSyncStatus('offline');
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
-
-  // Background sync helper
-  const triggerBackgroundSync = useCallback(
+  // Background push helper (debounced)
+  const triggerBackgroundPush = useCallback(
     (scriptUrl: string, tasksToSync: Task[]) => {
       if (!scriptUrl || typeof window === 'undefined') return;
 
@@ -169,7 +96,158 @@ export default function RoutineXPage() {
     []
   );
 
-  // Save tasks locally (immediate) and schedule cloud sync
+  // Auto-pull helper (fetches from Google Sheet and merges with local state)
+  const autoPullFromSheet = useCallback(
+    async (scriptUrl: string, silent: boolean = true) => {
+      if (!scriptUrl || isPullingRef.current || typeof window === 'undefined') return;
+      if (!navigator.onLine) return;
+
+      isPullingRef.current = true;
+      if (!silent) setSyncStatus('syncing');
+
+      try {
+        const res = await pullTasksFromSheet(scriptUrl);
+        if (res.success && Array.isArray(res.tasks)) {
+          setTasks((currentLocal) => {
+            const { merged, hasChanges } = mergeTasks(currentLocal, res.tasks!);
+            if (hasChanges) {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+              return merged;
+            }
+            return currentLocal;
+          });
+          setSyncStatus('synced');
+          const now = Date.now();
+          setSheetConfig((prev) => {
+            const updated = { ...prev, lastSyncedAt: now };
+            localStorage.setItem(CONFIG_KEY, JSON.stringify(updated));
+            return updated;
+          });
+        }
+      } catch (err) {
+        if (!silent) setSyncStatus('error');
+      } finally {
+        isPullingRef.current = false;
+      }
+    },
+    []
+  );
+
+  // 1. Initialize theme, online status, config, and tasks from LocalStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    setIsOnline(navigator.onLine);
+
+    // Theme initialization
+    const savedTheme = localStorage.getItem(THEME_KEY) as 'dark' | 'light' | null;
+    const initialTheme = savedTheme || 'dark';
+    setTheme(initialTheme);
+    if (initialTheme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+
+    // Sheet Config initialization
+    let loadedConfig: SheetConfig = { scriptUrl: '', lastSyncedAt: null, autoSync: true };
+    try {
+      const storedConfig = localStorage.getItem(CONFIG_KEY);
+      if (storedConfig) {
+        loadedConfig = JSON.parse(storedConfig);
+        setSheetConfig(loadedConfig);
+      }
+    } catch (e) {
+      console.error('Failed to load sheet config', e);
+    }
+
+    // Tasks initialization
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        setTasks(parsed);
+        setSyncStatus(loadedConfig.scriptUrl ? 'synced' : 'local_only');
+      } else {
+        setTasks(INITIAL_TASKS);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_TASKS));
+        setSyncStatus(loadedConfig.scriptUrl ? 'synced' : 'local_only');
+      }
+    } catch {
+      setTasks(INITIAL_TASKS);
+    } finally {
+      setIsLoaded(true);
+    }
+
+    // Auto-pull on initial app load if URL is present
+    if (loadedConfig.scriptUrl && navigator.onLine) {
+      autoPullFromSheet(loadedConfig.scriptUrl, true);
+    }
+
+    // Listen to network status
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (loadedConfig.scriptUrl) {
+        const currentTasks = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        triggerBackgroundPush(loadedConfig.scriptUrl, currentTasks);
+        autoPullFromSheet(loadedConfig.scriptUrl, false);
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [autoPullFromSheet, triggerBackgroundPush]);
+
+  // 2. Real-Time Auto-Pull triggers: Window Focus & Tab Visibility & Periodic Interval (25s)
+  useEffect(() => {
+    if (!sheetConfig.scriptUrl || typeof window === 'undefined') return;
+
+    // Window / Tab focus handler
+    const handleFocus = () => {
+      if (navigator.onLine && sheetConfig.scriptUrl) {
+        autoPullFromSheet(sheetConfig.scriptUrl, true);
+      }
+    };
+
+    // Document visibility change (swapping tabs, waking phone, unlocking screen)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine && sheetConfig.scriptUrl) {
+        autoPullFromSheet(sheetConfig.scriptUrl, true);
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Periodic auto-pull polling every 25 seconds when active
+    const pollInterval = setInterval(() => {
+      if (
+        document.visibilityState === 'visible' &&
+        navigator.onLine &&
+        sheetConfig.scriptUrl &&
+        !isPullingRef.current
+      ) {
+        autoPullFromSheet(sheetConfig.scriptUrl, true);
+      }
+    }, 25000);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(pollInterval);
+    };
+  }, [sheetConfig.scriptUrl, autoPullFromSheet]);
+
+  // Save tasks locally (immediate) and schedule cloud push
   const saveTasks = useCallback(
     (updated: Task[]) => {
       setTasks(updated);
@@ -178,13 +256,13 @@ export default function RoutineXPage() {
       }
 
       if (sheetConfig.scriptUrl) {
-        triggerBackgroundSync(sheetConfig.scriptUrl, updated);
+        triggerBackgroundPush(sheetConfig.scriptUrl, updated);
       }
     },
-    [sheetConfig.scriptUrl, triggerBackgroundSync]
+    [sheetConfig.scriptUrl, triggerBackgroundPush]
   );
 
-  // Manual push to Google Sheet
+  // Manual push to Google Sheet (Settings modal)
   const handleManualPush = async () => {
     if (!sheetConfig.scriptUrl) return;
     setIsSyncing(true);
@@ -209,7 +287,7 @@ export default function RoutineXPage() {
     }
   };
 
-  // Manual pull from Google Sheet
+  // Manual pull from Google Sheet (Settings modal or quick refresh)
   const handleManualPull = async () => {
     if (!sheetConfig.scriptUrl) return;
     setIsSyncing(true);
@@ -242,7 +320,8 @@ export default function RoutineXPage() {
     localStorage.setItem(CONFIG_KEY, JSON.stringify(newConfig));
     if (newConfig.scriptUrl) {
       setSyncStatus('syncing');
-      triggerBackgroundSync(newConfig.scriptUrl, tasks);
+      triggerBackgroundPush(newConfig.scriptUrl, tasks);
+      autoPullFromSheet(newConfig.scriptUrl, false);
     } else {
       setSyncStatus('local_only');
     }
@@ -403,7 +482,7 @@ export default function RoutineXPage() {
                     syncStatus === 'offline' ? '#f59e0b' :
                     syncStatus === 'error' ? '#ef4444' : '#a1a1aa'
                 }}
-                title="Google Sheet Sync Status. Click to configure."
+                title="Google Sheet Sync Status (Auto-syncs on load & focus). Click to configure."
               >
                 {syncStatus === 'synced' && <Cloud className="w-3 h-3" />}
                 {syncStatus === 'syncing' && <RefreshCw className="w-3 h-3 animate-spin" />}
@@ -411,7 +490,7 @@ export default function RoutineXPage() {
                 {syncStatus === 'local_only' && <span className="w-1.5 h-1.5 rounded-full bg-zinc-400" />}
                 {syncStatus === 'error' && <AlertCircle className="w-3 h-3" />}
                 <span>
-                  {syncStatus === 'synced' ? 'Cloud Synced' :
+                  {syncStatus === 'synced' ? 'Auto-Synced' :
                    syncStatus === 'syncing' ? 'Syncing...' :
                    syncStatus === 'offline' ? 'Offline (Queued)' :
                    syncStatus === 'error' ? 'Sync Error' : 'Local Only'}
@@ -424,7 +503,7 @@ export default function RoutineXPage() {
           <div className="flex items-center gap-1">
             <button
               onClick={() => setIsSettingsOpen(true)}
-              title="Google Sheet Cloud Settings"
+              title="Google Sheet Cloud Settings & Manual Sync"
               className="p-2 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 rounded-xl hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all text-xs font-medium"
             >
               <Settings className="w-4 h-4" />
@@ -641,7 +720,7 @@ export default function RoutineXPage() {
                     title="Delete task"
                     className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
 
@@ -654,7 +733,7 @@ export default function RoutineXPage() {
         <footer className="pt-6 border-t border-zinc-200/80 dark:border-zinc-800/80 flex flex-col sm:flex-row items-center justify-between text-[11px] text-zinc-400 dark:text-zinc-500 gap-2">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span>Hybrid Offline Storage + Google Sheet Sync</span>
+            <span>Real-Time Cloud Sync (Auto-Pulls on Load &amp; Focus)</span>
           </div>
           
           <button

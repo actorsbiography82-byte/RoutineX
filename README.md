@@ -1,6 +1,6 @@
-# RoutineX — Minimalist Daily Routine with Google Sheets Sync ⚡
+# RoutineX — Minimalist Daily Routine with Real-Time Google Sheets Sync ⚡
 
-**RoutineX** is a 100% minimalist, clean, and distraction-free daily routine and task tracker with **hybrid storage**: instant browser LocalStorage offline speed + automated Google Sheets cloud synchronization.
+**RoutineX** is a 100% minimalist, clean, and distraction-free daily routine and task tracker with **real-time hybrid synchronization**: instant browser LocalStorage offline speed + automated bidirectional Google Sheets cloud sync across all your devices.
 
 Built with **Next.js (App Router)**, **Tailwind CSS**, and **Lucide React**.
 
@@ -8,6 +8,11 @@ Built with **Next.js (App Router)**, **Tailwind CSS**, and **Lucide React**.
 
 ## ✨ Features
 
+- **Real-Time Auto-Syncing (PC & Mobile)**:
+  - **Auto-Pull on App Load**: Automatically fetches the latest tasks from your Google Sheet when you open RoutineX.
+  - **Auto-Pull on Window/Tab Focus**: Whenever you switch back to RoutineX on your computer or unlock your mobile phone screen, it immediately pulls the latest state.
+  - **Periodic Background Sync**: Runs an automatic check every 25 seconds when online and active.
+  - **Smart Reconciler**: Merges cloud state with local state based on task-level timestamps, preventing conflict or data loss.
 - **Minimalist & Distraction-Free UI**: High-contrast, clean typography, dark/light theme, and refined aesthetics.
 - **Pre-Loaded Daily Routine**:
   - **Fajar Block**: 1 Hour (Wazu/Nahana + 4 Rakat Namaz + 20 mins Quran Reading)
@@ -24,8 +29,6 @@ Built with **Next.js (App Router)**, **Tailwind CSS**, and **Lucide React**.
   - **Reset Day**: Uncheck all items for a fresh day with one tap.
 - **Hybrid Storage & Google Sheets Cloud Backend**:
   - **100% Offline Resilience**: Instant UI responsiveness via `localStorage`.
-  - **Automatic Cloud Sync**: Background synchronization with Google Sheets whenever an internet connection is available.
-  - **Offline Queue**: If offline, changes queue locally and auto-sync when connection returns.
   - **Zero Database Costs**: Uses Google Sheets as a free, transparent database.
 - **Settings Bridge**:
   - Easily paste your Google Apps Script Web App URL.
@@ -38,73 +41,7 @@ Built with **Next.js (App Router)**, **Tailwind CSS**, and **Lucide React**.
 
 1. Create a blank Google Sheet at [sheets.new](https://sheets.new).
 2. Go to **Extensions &rarr; Apps Script**.
-3. Paste the following script and save (`Ctrl+S`):
-
-```javascript
-function doGet(e) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  var data = sheet.getDataRange().getValues();
-  var tasks = [];
-
-  if (data.length > 1) {
-    for (var i = 1; i < data.length; i++) {
-      var row = data[i];
-      if (row[0]) {
-        tasks.push({
-          id: String(row[0]),
-          title: String(row[1] || ''),
-          time: String(row[2] || ''),
-          category: String(row[3] || 'General'),
-          completed: String(row[4]).toLowerCase() === 'true' || row[4] === true,
-          createdAt: Number(row[5] || Date.now()),
-          updatedAt: Number(row[6] || Date.now())
-        });
-      }
-    }
-  }
-
-  return ContentService.createTextOutput(JSON.stringify({
-    success: true,
-    tasks: tasks,
-    lastSyncedAt: Date.now()
-  })).setMimeType(ContentService.MimeType.JSON);
-}
-
-function doPost(e) {
-  try {
-    var payload = JSON.parse(e.postData.contents);
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-    var tasks = payload.data || [];
-
-    sheet.clearContents();
-    sheet.appendRow(["ID", "Title", "Time", "Category", "Completed", "CreatedAt", "UpdatedAt"]);
-
-    tasks.forEach(function(t) {
-      sheet.appendRow([
-        t.id,
-        t.title,
-        t.time || '',
-        t.category || 'General',
-        t.completed ? true : false,
-        t.createdAt || Date.now(),
-        t.updatedAt || Date.now()
-      ]);
-    });
-
-    return ContentService.createTextOutput(JSON.stringify({
-      success: true,
-      count: tasks.length,
-      lastSyncedAt: Date.now()
-    })).setMimeType(ContentService.MimeType.JSON);
-  } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({
-      success: false,
-      error: err.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
-  }
-}
-```
-
+3. Open the **Settings Modal** in RoutineX, click **"Copy Google Apps Script Code"**, paste it into Apps Script, and save (`Ctrl+S`).
 4. Click **Deploy &rarr; New deployment**.
 5. Choose **Web app**, set:
    - **Execute as**: `Me`
